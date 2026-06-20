@@ -1,3 +1,5 @@
+use rand::Rng;
+
 #[derive(Clone, Debug)]
 pub struct Vector {
     v: Vec<f32>,
@@ -14,6 +16,7 @@ impl Vector {
         self.v.len()
     }
 
+    //this is where the input is borrowed vector and it returns the borrowed string of vectors.
     fn as_slice(&self) -> &[f32] {
         &self.v
     }
@@ -22,7 +25,7 @@ impl Vector {
         let mut norm: f32 = 0.0;
         //here the val is an &f32 which is the reference so to dereference it we use &val
         //other option is to keep it val and inside the loop write (*val) instead of just val to dereference it
-        for &val in &self.v { norm += val * val; }
+        for val in &self.v { norm += (*val) * (*val); }
         let norm = norm.sqrt();
         if norm == 0.0 { return; }
         //the &mut self.v vector when looped gives out element having &mut f32 type
@@ -78,6 +81,86 @@ impl DistanceMetric for DotProduct {
             s += (v1[i] * v2[i]);
         }
         -s
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Node {
+    id: usize,
+    data: Vector,
+    neighbors: Vec<Vec<usize>>,
+}
+
+pub struct Index {
+    //All the vectors present in the List
+    nodes: Vec<Option<Node>>,
+    //The start point of the HNSW graph
+    start_point: Option<usize>,
+    max_height: u32,
+    //m is the maximum number of neighbors a single node is allowed to have at any given layer!
+    m: usize,
+    //The below attribute controls the quality vs. speed of inserting a new node!
+    //I would call it an hyperparameter
+    ef_construction: usize,
+    //The metric is the pointer to the actual data which actually lives in the heap
+    //The size of the pointer is 16 byte which is considered as an fat pointer
+    //8 byte for the pointer of the data which metric is gonna hold:
+    //Another 8 byte for the vtable which tells the rust which dist() function to run:
+    //The box actually bounds the address where the data in the heap is actually living like the
+    //actual data living in the heap can be of any data size but the pointer which Box will hold is
+    //bound to have 8 bytes
+    //The other 8 bytes stores the address of the vtable which contains the address of all the
+    //traits of this particular struct, because rust doesn't know which dist function.
+    metric: Box<dyn DistanceMetric>,
+}
+
+//Box<dyn DistanceMetric> is a data type btw
+//Box is an heap allocated pointer;
+
+impl Index {
+    pub fn new(m: usize, ef_construction: usize, metric: Box<dyn DistanceMetric>) -> Self {
+        Self {
+            nodes: Vec::new(),
+            start_point: None,
+            max_height: 0,
+            m,
+            ef_construction,
+            metric,
+        }
+    }
+
+    //This function will basically roll a weighted die and decide, like in which layer the vector will fall.
+    pub fn random_level(&self) -> usize {
+        let r: f64 = rand::random();
+        if r == 0.0 { return 0; }
+        let ml: f64 = 1.0 / (self.m as f64).ln();
+        let lev: usize = (-r.ln() * ml).floor() as usize;
+        lev
+    }
+
+    pub fn insert_vec(&mut self, vec: Vec<f32>) {
+        let v = Vector::new(vec);
+        let level = self.random_level();
+        let id = self.nodes.len();
+        let neighbors = vec![vec![]; level + 1];
+        let node = Node {
+            id,
+            data: v,
+            neighbors,
+        }
+        self.nodes.push(Some(node));
+        if self.start_point == None {
+            self.start_point = Some(id);
+            self.max_height = level as u32;
+            return;
+        }
+
+        //To find the best neighborhood for your node at a layer.
+        //At each layer, it looks at the current node's neighbors.
+        //You kinda loook at all the neighbor node in the current node and only move with the
+        //neighbor which is the closest one
+
+        // self.max_height = self.max_height.max(level as u32);
     }
 }
 
