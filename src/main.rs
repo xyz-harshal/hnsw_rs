@@ -179,7 +179,7 @@ impl Index {
             }
             if b { survivors.push(*node); }
         }
-       survivors 
+       survivors
     }
 
     pub fn insert_vec(&mut self, vec: Vec<f32>) {
@@ -203,19 +203,60 @@ impl Index {
         //At each layer, it looks at the current node's neighbors.
         //You kinda loook at all the neighbor node in the current node and only move with the
         //neighbor which is the closest one
-        
+
         let mut start: usize = self.start_point.unwrap();
         for i in (0..=self.max_height).rev() {
 
             let mut candidate: Vec<usize> = self.search_layer(&self.nodes[id].as_ref().unwrap().data.v, i, start, self.ef_construction);
             if candidate.is_empty() { continue; }
             start = candidate[0];
-            //This will make sure to get the m best nodes which are closest to the input node.
-            //candidate.truncate(self.m);
-
 
             if i <= level as u32 {
                 candidate = self.select_neighbors(id, &candidate, self.m);
+                self.nodes[id].as_mut().unwrap().neighbors[i as usize] = candidate.clone();
+                for survivor in &candidate {
+                    let mut survivor_neighbor: &mut Vec<usize> = &mut self.nodes[*survivor].as_mut().unwrap().neighbors[i as usize];
+                    survivor_neighbor.push(id);
+                    if survivor_neighbor.len() > self.m {
+                        let mut temp: Vec<(f32, usize)> = Vec::new();
+                        for surv in &*survivor_neighbor {
+                            temp.push((self.metric.dist(&self.nodes[*surv].as_ref().unwrap().data.v, &self.nodes[*survivor].as_ref().unwrap().data.v), *surv));
+                        }
+                        temp.sort_by(|a, b| a.0.total_cmp(&b.0));
+                        let mut sorted_neighbors: Vec<usize> = Vec::new();
+                        for (_, addr) in temp {
+                            sorted_neighbors.push(addr);
+                        }
+                        sorted_neighbors = self.select_neighbors(*survivor, &sorted_neighbors, self.m);
+                        let mut b: bool = false;
+                        for addr in &sorted_neighbors {
+                            if *addr == id { b = true; }
+                        }
+                        if !b {
+                            let mut temp: Vec<(f32, usize)> = Vec::new();
+                            for addr in &sorted_neighbors {
+                                temp.push((self.metric.dist(&self.nodes[*addr].as_ref().unwrap().data.v, &self.nodes[*survivor].as_ref().unwrap().data.v), *addr));
+                            }
+                            let mut a: f32 = f32::NEG_INFINITY;
+                            let mut b: usize = 0;
+                            for j in 0..temp.len() {
+                                if let Some((dist, tid)) = temp.get(j) {
+                                    if *dist > a {
+                                        a = *dist;
+                                        b = j;
+                                    }
+                                }
+                            }
+                            let (_, tid) = temp[b];
+                            let mut neigh: Vec<usize> = Vec::new();
+                            for (_, addr) in temp {
+                                if addr == tid { continue; }
+                                neigh.push(addr);
+                            }
+                            *survivor_neighbor = neigh;
+                        }else { *survivor_neighbor = sorted_neighbors; }
+                    }
+                }
             }
         }
         if self.max_height < level as u32 {
@@ -279,6 +320,7 @@ impl Index {
         result.reverse();
         result
     }
+
     pub fn search(&self, input_node_data: &[f32], ef_search: usize, k: usize) -> Vec<usize> {
         if self.start_point.is_none() { return Vec::new(); }
         let mut start: usize = self.start_point.unwrap();
