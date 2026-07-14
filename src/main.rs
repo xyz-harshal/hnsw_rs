@@ -4,6 +4,8 @@
 //Reaching a field just names us places - we don't own it.
 //&path if mentioned explicitly will give us reference to the data till the path ends.
 //the & given by the .as_ref() func will only give ref to it's target not it's childrens!
+//
+//Each core in the CPU has it's own SIMD units.
 use std::collections::{HashSet, BinaryHeap};
 use std::cmp::Reverse;
 use rand::Rng;
@@ -212,50 +214,26 @@ impl Index {
             start = candidate[0];
 
             if i <= level as u32 {
+                let cap: usize = if i == 0 { 2 * self.m } else { self.m };
                 candidate = self.select_neighbors(id, &candidate, self.m);
                 self.nodes[id].as_mut().unwrap().neighbors[i as usize] = candidate.clone();
                 for survivor in &candidate {
-                    let mut survivor_neighbor: &mut Vec<usize> = &mut self.nodes[*survivor].as_mut().unwrap().neighbors[i as usize];
+                    //here i am taking a mutable reference of the self.nodes object
+                    let mut survivor_neighbor: Vec<usize> = self.nodes[*survivor].as_mut().unwrap().neighbors[i as usize].clone();
                     survivor_neighbor.push(id);
-                    if survivor_neighbor.len() > self.m {
+                    if survivor_neighbor.len() > cap {
                         let mut temp: Vec<(f32, usize)> = Vec::new();
-                        for surv in &*survivor_neighbor {
+                        for surv in &survivor_neighbor {
                             temp.push((self.metric.dist(&self.nodes[*surv].as_ref().unwrap().data.v, &self.nodes[*survivor].as_ref().unwrap().data.v), *surv));
                         }
                         temp.sort_by(|a, b| a.0.total_cmp(&b.0));
-                        let mut sorted_neighbors: Vec<usize> = Vec::new();
-                        for (_, addr) in temp {
-                            sorted_neighbors.push(addr);
+                        survivor_neighbor.clear();
+                        for (_, addr) in &temp {
+                            survivor_neighbor.push(*addr);
                         }
-                        sorted_neighbors = self.select_neighbors(*survivor, &sorted_neighbors, self.m);
-                        let mut b: bool = false;
-                        for addr in &sorted_neighbors {
-                            if *addr == id { b = true; }
-                        }
-                        if !b {
-                            let mut temp: Vec<(f32, usize)> = Vec::new();
-                            for addr in &sorted_neighbors {
-                                temp.push((self.metric.dist(&self.nodes[*addr].as_ref().unwrap().data.v, &self.nodes[*survivor].as_ref().unwrap().data.v), *addr));
-                            }
-                            let mut a: f32 = f32::NEG_INFINITY;
-                            let mut b: usize = 0;
-                            for j in 0..temp.len() {
-                                if let Some((dist, tid)) = temp.get(j) {
-                                    if *dist > a {
-                                        a = *dist;
-                                        b = j;
-                                    }
-                                }
-                            }
-                            let (_, tid) = temp[b];
-                            let mut neigh: Vec<usize> = Vec::new();
-                            for (_, addr) in temp {
-                                if addr == tid { continue; }
-                                neigh.push(addr);
-                            }
-                            *survivor_neighbor = neigh;
-                        }else { *survivor_neighbor = sorted_neighbors; }
+                       survivor_neighbor = self.select_neighbors(*survivor, &survivor_neighbor, cap);
                     }
+                    self.nodes[*survivor].as_mut().unwrap().neighbors[i as usize] = survivor_neighbor;
                 }
             }
         }
