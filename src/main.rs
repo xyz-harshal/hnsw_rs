@@ -11,6 +11,9 @@
 //In a loop if each step requires answer from the previous step then it can't be parallelized
 //For a loop to be parallelized ie vectorized with SIMD then the loop should only use values in present state
 //The chunks_exact(n) function gives an iterator which points to the og data in the heap but it gives the iterator in such a way so that chunks are created!
+//The Vec<f32> is not the floats. It is a 24-byte struct sitting on the stack holds 3 different fields. The pointer to the heap buffer, the length and the capacity.
+//The CPU has no concept of "stack" or "heap" — those are just conventions your program imposes on plain memory.
+//A load from a stack address and a load from a heap address are literally the same instruction. So the speed difference you feel is never because one region is inherently faster. It's about caching. 
 
 //=== DONE: SIMD dist ✓ (all metrics + normalize vectorized; gap 3.5x -> ~2.5x) ===
 
