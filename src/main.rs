@@ -14,6 +14,19 @@
 //The Vec<f32> is not the floats. It is a 24-byte struct sitting on the stack holds 3 different fields. The pointer to the heap buffer, the length and the capacity.
 //The CPU has no concept of "stack" or "heap" — those are just conventions your program imposes on plain memory.
 //A load from a stack address and a load from a heap address are literally the same instruction. So the speed difference you feel is never because one region is inherently faster. It's about caching. 
+//We used .as_ref() to conver the &Option<T> into Option<&T>
+//The &Option<T> is because of the &self at the beginning.
+//We use .unwrap() to resolve Option<&T> into &T
+//The & at the beginning is the explicit  borrow operator
+//After .unwrap() gives us &Node(), which gives us &Vec<f32>
+//A set to actually keep track of visited nodes while traversing in the graph.
+//The information of the current node is inserted in the binary heap!
+//The Vec<usize> is an growable vector whereas the [usize] is an slice which whose size is dynamically determined at runtime
+//Now i am using the .get() function which gives out the Option<&T> so we don't need to
+//put the & ref before the statement, we did this because when we did indexing on the
+//neighbors 2d vec, rust gives out the owned value when indexing so now it won't.
+//The binary heap requires T: Ord instead of f32 so that it can use the cmp function to
+//compare and sort because f32 can be NaN sometimes.
 
 //=== DONE: SIMD dist ✓ (all metrics + normalize vectorized; gap 3.5x -> ~2.5x) ===
 
@@ -27,23 +40,23 @@
 // FAIL = any recall drop -> bisect the refactor
 
 //=== THEN: memory layout (the remaining ~2-2.5x, big refactor) ===
-//TODO: Kill the .clone()s in insert while restructuring (folded into this refactor, not before)
-//TODO: Verify vs baseline: recall identical, queries faster — else bisect
+// TODO : Kill the .clone()s in insert while restructuring (folded into this refactor, not before)
+// TODO : Verify vs baseline: recall identical, queries faster — else bisect
 
 //=== ALGORITHM GARNISHES (unchanged) ===
-//TODO: keepPrunedConnections -- backfill empty slots with best rejected candidates
-//TODO: alpha-pruning parameter (alpha=1.0 current; try 1.2 like DiskANN, benchmark recall)
+// TODO : keepPrunedConnections -- backfill empty slots with best rejected candidates
+// TODO : alpha-pruning parameter (alpha=1.0 current; try 1.2 like DiskANN, benchmark recall)
 
 //=== RESEARCH TOYS (one addition) ===
-//TODO: Benchmark on a REAL dataset (SIFT1M standard) -- random high-dim data understates recall
-//TODO: Quantization f32 -> int8: per-vector scale, calibrate range, then the recall ladder
-//TODO: Re-rank pipeline: search quantized, exact re-rank top-100
-//TODO: Rayon: parallelize search across queries
-//TODO: Own recall-vs-QPS curve vs ann-benchmarks.com
+// TODO : Benchmark on a REAL dataset (SIFT1M standard) -- random high-dim data understates recall
+// TODO : Quantization f32 -> int8: per-vector scale, calibrate range, then the recall ladder
+// TODO : Re-rank pipeline: search quantized, exact re-rank top-100
+// TODO : Rayon: parallelize search across queries
+// TODO : Own recall-vs-QPS curve vs ann-benchmarks.com
 
 //=== HYGIENE (one item resolved by Cosine redesign) ===
-//TODO: Delete unused Rng import
-//TODO: Invariant checks: zero orphans at layer 0, all edges valid
+// TODO : Delete unused Rng import
+// TODO : Invariant checks: zero orphans at layer 0, all edges valid
 
 use std::collections::{HashSet, BinaryHeap};
 use std::cmp::Reverse;
@@ -163,7 +176,6 @@ pub struct Node {
     id: usize,
     neighbor0: Vec<u32>,
     neighbors: Vec<u32>,
-    
 }
 
 pub struct Index {
@@ -289,23 +301,30 @@ impl Index {
                     for z in 0..candidate.len() {
                         self.nodes[id].as_mut().unwrap().neighbor0[z] = candidate[z];
                     }
+                    for z in candidate.len()..cap {
+                        self.nodes[id].as_mut().unwrap().neighbor0[z] = u32::MAX;
+                    }
                 }else {
-                    for z in (i - 1) * cap..i * cap {
-                        self.nodes[id].as_mut().unwrap().neighbors[z] = candidate[z - (i - 1) * cap];
+                    for z in 0..candidate.len() {
+                        self.nodes[id].as_mut().unwrap().neighbors[(i - 1) * cap + z] = candidate[z];
+                    }
+                    for z in candidate.len()..cap {
+                        self.nodes[id].as_mut().unwrap().neighbors[(i - 1) * cap + z] = u32::MAX;
                     }
                 }
-                //self.nodes[id].as_mut().unwrap().neighbors[i] = candidate.clone();
                 for &survivor in &candidate {
                     //here i am taking a mutable reference of the self.nodes object
                     //here i have to change the neighbors vector to get what i want:
-                    let mut survivor_neighbor: Vec<u32> = Vec::new();
-                    if i == 0 {
-                        survivor_neighbor = self.nodes[survivor as usize].as_mut().unwrap().neighbor0.clone();
+                    let mut survivor_neighbor: Vec<u32> = if i == 0 {
+                        self.nodes[survivor as usize].as_ref().unwrap().neighbor0.clone()
                     }else {
-                        survivor_neighbor = self.nodes[survivor as usize].as_mut().unwrap().neighbors[(i - 1) * cap..i * cap].clone();
-                    }
-                    //let mut survivor_neighbor: Vec<u32> = self.nodes[survivor as usize].as_mut().unwrap().neighbors[i].clone();
+                        self.nodes[survivor as usize].as_ref().unwrap().neighbors[(i - 1) * cap..i * cap].to_vec()
+                    };
+                    let useless_neighbors: usize = survivor_neighbor.iter().filter(|&&a| a == u32::MAX).count();
+                    survivor_neighbor.truncate(survivor_neighbor.len() - useless_neighbors);
+
                     survivor_neighbor.push(id as u32);
+
                     if survivor_neighbor.len() > cap {
                         let mut temp: Vec<(f32, u32)> = Vec::new();
                         for &surv in &survivor_neighbor {
@@ -319,11 +338,20 @@ impl Index {
                        survivor_neighbor = self.select_neighbors(survivor as usize, &survivor_neighbor, cap);
                     }
                     if i == 0 {
-                        self.nodes[survivor as usize].as_mut().unwrap().neighbor0 = survivor_neighbor;
+                        for z in 0..survivor_neighbor.len() {
+                            self.nodes[survivor as usize].as_mut().unwrap().neighbor0[z] = survivor_neighbor[z];
+                        }
+                        for z in survivor_neighbor.len()..cap {
+                            self.nodes[survivor as usize].as_mut().unwrap().neighbor0[z] = u32::MAX;
+                        }
                     }else {
-                        self.nodes[survivor as usize].as_mut().unwrap().neighbors[(i - 1) * cap..i * cap] = survivor_neighbor;
+                        for z in 0..survivor_neighbor.len() {
+                            self.nodes[survivor as usize].as_mut().unwrap().neighbors[(i - 1) * cap + z] = survivor_neighbor[z];
+                        }
+                        for z in survivor_neighbor.len()..cap {
+                            self.nodes[survivor as usize].as_mut().unwrap().neighbors[(i - 1) * cap + z] = u32::MAX;
+                        }
                     }
-                    //self.nodes[survivor as usize].as_mut().unwrap().neighbors[i] = survivor_neighbor;
                 }
             }
         }
@@ -335,19 +363,6 @@ impl Index {
 
     //greedy search at single layer.
     pub fn search_layer(&self, input_node_data: &[f32], height: usize, current_node_index: u32, ef: usize, visited: &mut Vec<u32>, count: u32) -> Vec<u32> {
-        //We used .as_ref() to conver the &Option<T> into Option<&T>
-        //The &Option<T> is because of the &self at the beginning.
-        //We use .unwrap() to resolve Option<&T> into &T
-        //The & at the beginning is the explicit  borrow operator
-        //After .unwrap() gives us &Node(), which gives us &Vec<f32>
-        //A set to actually keep track of visited nodes while traversing in the graph.
-        //The information of the current node is inserted in the binary heap!
-        //The Vec<usize> is an growable vector whereas the [usize] is an slice which whose size is dynamically determined at runtime
-        //Now i am using the .get() function which gives out the Option<&T> so we don't need to
-        //put the & ref before the statement, we did this because when we did indexing on the
-        //neighbors 2d vec, rust gives out the owned value when indexing so now it won't.
-        //The binary heap requires T: Ord instead of f32 so that it can use the cmp function to
-        //compare and sort because f32 can be NaN sometimes.
         
         let mut frontier: BinaryHeap<Reverse<(OrdF32, u32)>> = BinaryHeap::new();
         let mut board: BinaryHeap<(OrdF32, u32)> = BinaryHeap::new();
@@ -363,16 +378,13 @@ impl Index {
             if let Some(Reverse((dist, id))) = frontier.pop() {
                 if board.len() >= ef && board.peek().unwrap().0 < dist { break; }
                 //Time to get all the neighbors of this particular id;
-                let mut neighbors: &Vec<u32> = Vec::new();
-                if height == 0 {
-                    neighbors = &self.nodes[id as usize].as_ref().unwrap().neighbor0;
+                let neighbors: Vec<u32> = if height == 0 {
+                    self.nodes[id as usize].as_ref().unwrap().neighbor0.clone()
                 }else {
-                    neighbors = &self.nodes[id as usize].as_ref().unwrap().neighbors[(height - 1) * self.m..height * self.m];
-                }
-                //let neighbors: &Vec<u32> = &self.nodes[id as usize].as_ref().unwrap().neighbors[height];
-
-                for &neighbor in neighbors {
-                    if visited[neighbor as usize] == count { continue; }
+                    self.nodes[id as usize].as_ref().unwrap().neighbors[(height - 1) * self.m..height * self.m].to_vec()
+                };
+                for neighbor in neighbors {
+                    if neighbor == u32::MAX || visited[neighbor as usize] == count { continue; }
                     else { visited[neighbor as usize] = count; }
                     let neighbor_curr_dist: OrdF32 = OrdF32(self.metric.dist(self.get_vec(neighbor as usize), input_node_data));
                     if board.len() >= ef && board.peek().unwrap().0 < neighbor_curr_dist { continue; }
