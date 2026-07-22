@@ -40,27 +40,40 @@
 // FAIL = any recall drop -> bisect the refactor
 
 //=== THEN: memory layout (the remaining ~2-2.5x, big refactor) ===
-// TODO : Kill the .clone()s in insert while restructuring (folded into this refactor, not before)
-// TODO : Verify vs baseline: recall identical, queries faster — else bisect
 
-//=== ALGORITHM GARNISHES (unchanged) ===
-// TODO : keepPrunedConnections -- backfill empty slots with best rejected candidates
-// TODO : alpha-pruning parameter (alpha=1.0 current; try 1.2 like DiskANN, benchmark recall)
+//=== MEMORY & ALLOCATION (massive build‑time win, minor query gain) ===
+// TODO : Generation‑counter visited array – replace per‑insertion visited Vec with a global Vec<u32> + u32 generation counter. This eliminates the allocation and zero‑fill on every insert and search.
 
-//=== RESEARCH TOYS (one addition) ===
-// TODO : Benchmark on a REAL dataset (SIFT1M standard) -- random high-dim data understates recall
-// TODO : Quantization f32 -> int8: per-vector scale, calibrate range, then the recall ladder
-// TODO : Re-rank pipeline: search quantized, exact re-rank top-100
+//=== VALIDATION (gate before further tuning) ===
+// TODO : Benchmark on a REAL dataset (SIFT1M standard) – verify recall advantage is not just synthetic
+
+//=== ALGORITHM POLISH (directly improves recall) ===
+// TODO : keepPrunedConnections — backfill empty slots with best rejected candidates
+// TODO : alpha‑pruning parameter (alpha=1.0 current; try 1.2 like DiskANN, benchmark recall)
+
+//=== METRIC‑SPECIFIC PERFORMANCE (cosine gap reduction) ===
+// TODO : Cosine distance optimisation – after normalise‑on‑insert, store only normalised vectors and replace Cosine::dist 
+//        with an inlined dot‑product‑plus‑offset (avoid double trait dispatch). Goal: cosine query speed ≈ Euclidean.
+
+//=== SCALABLE PERFORMANCE (major speedups after recall is solid) ===
+// TODO : Quantization f32 -> int8: per‑vector scale, calibrate range, then the recall ladder
+
+//=== ADVANCED SEARCH QUALITY (combines quantisation + exact) ===
+// TODO : Re‑rank pipeline: search quantized, exact re‑rank top‑100
+
+//=== PARALLELISM (independent of above) ===
 // TODO : Rayon: parallelize search across queries
-// TODO : Own recall-vs-QPS curve vs ann-benchmarks.com
 
-//=== HYGIENE (one item resolved by Cosine redesign) ===
-// TODO : Delete unused Rng import
-// TODO : Invariant checks: zero orphans at layer 0, all edges valid
+//=== MICRO‑OPTIMISATIONS (small, safe speedups) ===
+// TODO : Use copy_from_slice for neighbour list write‑back instead of manual loops
+// TODO : Reuse the temporary Vec in pruning overflow instead of allocating each time
 
-use std::collections::{HashSet, BinaryHeap};
+//=== FINAL ANALYSIS ===
+// TODO : Own recall‑vs‑QPS curve vs ann‑benchmarks.com
+
+use std::collections::BinaryHeap;
 use std::cmp::Reverse;
-use rand::Rng;
+use rand;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct OrdF32(f32);
@@ -238,7 +251,7 @@ impl Index {
         &mut self.vectors[id * self.dim..(id + 1) * self.dim]
     }
 
-    pub fn select_neighbors(&self, base_vec: usize, neighbor: &Vec<u32>, m: usize) -> Vec<u32> {
+    pub fn select_neighbors(&self, base_vec: usize, neighbor: &[u32], m: usize) -> Vec<u32> {
         let mut survivors: Vec<u32> = Vec::new();
         for &node in neighbor {
             if survivors.len() >= m { break; }
@@ -262,7 +275,7 @@ impl Index {
         let level: usize = self.random_level();
         let id: usize = self.nodes.len();
         let neighbor0 = vec![u32::MAX; 2 * self.m];
-        let neighbors = vec![u32::MAX; (level + 1) * self.m];
+        let neighbors = vec![u32::MAX; (level) * self.m];
         let node = Node {
             id,
             neighbor0,
@@ -312,16 +325,15 @@ impl Index {
                         self.nodes[id].as_mut().unwrap().neighbors[(i - 1) * cap + z] = u32::MAX;
                     }
                 }
+                let mut survivor_neighbor: Vec<u32> = Vec::with_capacity(cap + 1);
                 for &survivor in &candidate {
-                    //here i am taking a mutable reference of the self.nodes object
-                    //here i have to change the neighbors vector to get what i want:
-                    let mut survivor_neighbor: Vec<u32> = if i == 0 {
-                        self.nodes[survivor as usize].as_ref().unwrap().neighbor0.clone()
+                    survivor_neighbor.clear();
+                    let src: &[u32] = if i == 0 {
+                        &self.nodes[survivor as usize].as_ref().unwrap().neighbor0
                     }else {
-                        self.nodes[survivor as usize].as_ref().unwrap().neighbors[(i - 1) * cap..i * cap].to_vec()
+                        &self.nodes[survivor as usize].as_ref().unwrap().neighbors[(i - 1) * cap..i * cap]
                     };
-                    let useless_neighbors: usize = survivor_neighbor.iter().filter(|&&a| a == u32::MAX).count();
-                    survivor_neighbor.truncate(survivor_neighbor.len() - useless_neighbors);
+                    survivor_neighbor.extend(src.iter().copied().filter(|&x| x != u32::MAX));
 
                     survivor_neighbor.push(id as u32);
 
@@ -335,7 +347,9 @@ impl Index {
                         for (_, addr) in &temp {
                             survivor_neighbor.push(*addr);
                         }
-                       survivor_neighbor = self.select_neighbors(survivor as usize, &survivor_neighbor, cap);
+                        let pruned = self.select_neighbors(survivor as usize, &survivor_neighbor, cap);
+                        survivor_neighbor.clear();
+                        survivor_neighbor.extend(pruned);
                     }
                     if i == 0 {
                         for z in 0..survivor_neighbor.len() {
@@ -363,10 +377,10 @@ impl Index {
 
     //greedy search at single layer.
     pub fn search_layer(&self, input_node_data: &[f32], height: usize, current_node_index: u32, ef: usize, visited: &mut Vec<u32>, count: u32) -> Vec<u32> {
-        
+
         let mut frontier: BinaryHeap<Reverse<(OrdF32, u32)>> = BinaryHeap::new();
         let mut board: BinaryHeap<(OrdF32, u32)> = BinaryHeap::new();
-        
+
         //Now i am going to insert the current node in both of the heaps:
         let c0: OrdF32 = OrdF32(self.metric.dist(self.get_vec(current_node_index as usize), input_node_data));
         frontier.push(Reverse((c0, current_node_index)));
@@ -378,12 +392,12 @@ impl Index {
             if let Some(Reverse((dist, id))) = frontier.pop() {
                 if board.len() >= ef && board.peek().unwrap().0 < dist { break; }
                 //Time to get all the neighbors of this particular id;
-                let neighbors: Vec<u32> = if height == 0 {
-                    self.nodes[id as usize].as_ref().unwrap().neighbor0.clone()
+                let neighbors: &[u32] = if height == 0 {
+                    &self.nodes[id as usize].as_ref().unwrap().neighbor0
                 }else {
-                    self.nodes[id as usize].as_ref().unwrap().neighbors[(height - 1) * self.m..height * self.m].to_vec()
+                    &self.nodes[id as usize].as_ref().unwrap().neighbors[(height - 1) * self.m..height * self.m]
                 };
-                for neighbor in neighbors {
+                for &neighbor in neighbors {
                     if neighbor == u32::MAX || visited[neighbor as usize] == count { continue; }
                     else { visited[neighbor as usize] = count; }
                     let neighbor_curr_dist: OrdF32 = OrdF32(self.metric.dist(self.get_vec(neighbor as usize), input_node_data));
@@ -407,23 +421,22 @@ impl Index {
         result
     }
 
-    pub fn search(&self, input_node_data: &[f32], ef_search: usize, k: usize) -> Vec<u32> {
+    pub fn search(&self, input_node_data: &mut [f32], ef_search: usize, k: usize) -> Vec<u32> {
         if self.start_point.is_none() { return Vec::new(); }
         //The input_node_data.to_vec() is somewhat kinda not that expensive operation and it should
         //be solved later, but for now it increases nanoseconds against the miliseconds
-        let mut query: Vec<f32> = input_node_data.to_vec();
         if self.metric.needs_normalize() {
-            normalize(&mut query);
+            normalize(input_node_data);
         }
         let mut start: u32 = self.start_point.unwrap() as u32;
         let mut candidate: Vec<u32> = Vec::new();
-        let mut visited: Vec<u32> = vec![0u32; self.nodes.len()]; 
+        let mut visited: Vec<u32> = vec![0u32; self.nodes.len()];
         let mut count: u32 = 1;
         for i in (0..=self.max_height).rev() {
             if i == 0 {
-                candidate = self.search_layer(&query, i, start, ef_search, &mut visited, count);
+                candidate = self.search_layer(input_node_data, i, start, ef_search, &mut visited, count);
             }else{
-                candidate = self.search_layer(&query, i, start, 1, &mut visited, count);
+                candidate = self.search_layer(input_node_data, i, start, 1, &mut visited, count);
                 if candidate.is_empty() { continue; }
                 start = candidate[0];
             }
